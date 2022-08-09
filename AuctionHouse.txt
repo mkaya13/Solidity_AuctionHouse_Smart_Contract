@@ -1,0 +1,157 @@
+ // SPDX-License-Identifier: GPL-3.0
+
+ pragma solidity >=0.5.0 <=0.9.0;
+
+ /*
+ 1. Auction has an owner (the person who sells a good or service), a start and end date
+ 2. The owner can cancel the auction if there is an emergency or can finalize the auction after its end time.
+ 3. People are sending ETH by calling a function called placeBid(). Sender's address and the value sent to the auction will be stored
+ in mapping variable called bids
+ 4. Users are incentivized to bid max. They are willing to pay, but they are not bound to that full amount, but rather to the previous highest
+ bid plus an increment. The contract will automatically bid up to a given amount
+ 5. HighestBindingBid is the selling price and the highestBinder the person who won the auction
+ 6. After auction ends the owner gets highestBindingBid and everybody else withdraws their own amount.
+
+ */
+
+
+ /*
+We are gonna create SC for each auction, but the owner of the auction needs to return us the new contract address to display details about the
+new auction on our website. If we take this approach, there will be a security problem. If we send the contract's byte code to third party
+which we do not trust, that party might alter the bytecode and remove some restrictions.
+
+The best approach is to create another contract, which is a creator contract that calls a function that deploys a new instance of the actual
+auction contract. That means when a user wants to deploy a new auction contract for a product or service, he simply calls a function of the creator
+contract, which we control.
+
+We will be the owner of creator contract, and calling a function of the creator contract a new instance of the auction will be deployed and
+the user is the one that will pay for the gas because the user will call the function.
+
+ */
+
+
+ contract AuctionCreator{
+     Auction[] public auctions;
+
+     function createAuction() public {
+         Auction newAuction = new Auction(msg.sender);       // Pass newAuction inside below Auction
+         auctions.push(newAuction);                          // Collect newly created auction hashes
+     }
+ }
+
+ contract Auction {
+    address payable public owner;  // it can receive ETH and it can be accessed and seen by anyone.
+    uint public startBlock;
+    uint public endBlock;
+    string public ipfsHash;
+
+    enum State {Started, Running, Ended, Canceled}
+    State public auctionState;
+    
+    uint public highestBindingBid;
+    address payable public highestBidder;
+
+    mapping(address => uint) public bids;
+
+    uint bidIncrement;
+
+    // ETH block time is 15 seconds 
+
+    constructor(address eoa) {                  // Pass 
+        owner = payable(eoa);
+        auctionState = State.Running;
+        startBlock = block.number;
+        endBlock = startBlock + 40320;          // This means the auction will be running approximately a week
+        ipfsHash = "";
+        bidIncrement = 100;
+
+
+    }
+
+    modifier notOwner() {
+        require(msg.sender != owner);
+        _;
+    }
+
+    modifier afterStart() {
+        require(block.number >= startBlock);
+        _;
+    }
+
+    modifier beforeEnd() {
+        require(block.number <= endBlock);
+        _;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner);
+        _;
+    }
+
+
+    function min (uint a, uint b) internal pure returns (uint) {
+        if(a <= b) {
+            return a;
+        }
+        else return b;
+    }
+
+    function cancelAuction() public onlyOwner {
+        auctionState = State.Canceled;
+    }
+
+    function placeBid() public payable notOwner afterStart beforeEnd {                 // apply modifiers to the function
+        require(auctionState == State.Running);
+        require(msg.value >= 100);
+
+        uint currentBid = bids[msg.sender] + msg.value;
+        require(currentBid > highestBindingBid);
+
+        bids[msg.sender] = currentBid;
+
+        if(currentBid <= bids[highestBidder]) {
+            highestBindingBid = min(currentBid + bidIncrement, bids[highestBidder]);
+        }
+        else {
+            highestBindingBid = min(currentBid, bids[highestBidder] + bidIncrement);
+            highestBidder = payable(msg.sender);
+        }
+    }
+
+    function finalizeAction() public {
+        require(auctionState == State.Canceled || block.number > endBlock);
+        require(msg.sender == owner || bids[msg.sender] > 0);
+
+        address payable recipient;
+        uint value;
+
+        if(auctionState == State.Canceled) { // auction was canceled
+            recipient = payable(msg.sender);
+            value = bids[msg.sender];
+
+        } else {  // auction ended (not canceled)
+            if (msg.sender == owner) {
+                recipient = owner;
+                value = highestBindingBid;
+            } else {  // this is a bidder
+                if(msg.sender == highestBidder) {
+                    recipient = highestBidder;
+                    value = bids[highestBidder] - highestBindingBid;
+                } else { // this is neither the owner nor the highestBidder
+                    recipient = payable(msg.sender);
+                    value = bids[msg.sender];
+                }
+            }
+
+        }
+
+        // Resetting the bids of the Recipient to Zero
+        bids[recipient] = 0;
+
+        // Sends Value to the Owner
+        recipient.transfer(value);
+
+    }
+  
+ }
+ 
